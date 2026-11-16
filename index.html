@@ -120,6 +120,17 @@
     }
   };
 
+  // ---------- Copia sin conexion ----------
+  var offlineReady = false;
+  if ('serviceWorker' in navigator) {
+    try {
+      navigator.serviceWorker.register('sw.js')
+        .then(function () { return navigator.serviceWorker.ready; })
+        .then(function () { offlineReady = true; })
+        .catch(function () {});
+    } catch (e) {}
+  }
+
   function fmt(n) {
     n = Math.floor(n);
     if (n < 1000) return '' + n;
@@ -160,7 +171,7 @@
     },
     draw: function () {
       var l = this.layout(), p = P(), pn = Math.max(2, p - 1);
-      col(GREY); T('MINIJUEGOS', W / 2, H * 0.04, 2);
+      col(GREY); T(offlineReady ? 'OFFLINE OK' : 'MINIJUEGOS', W / 2, H * 0.04, 2);
       var ms = store.get('mine', null);
       var items = [
         ['ESCALERA', 'MEJOR ' + store.get('bestTorre', 0)],
