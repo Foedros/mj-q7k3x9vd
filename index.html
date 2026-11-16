@@ -74,7 +74,7 @@
     '8': '111101111101111', '9': '111101111001110',
     '+': '000010111010000', '-': '000000111000000', '.': '000000000000010',
     '<': '001010100010001', '>': '100010001010100', '!': '010010010000010',
-    '/': '001001010100100'
+    '/': '001001010100100', '%': '101001010100101'
   };
   // M y W necesitan 5 de ancho para no confundirse con N y H
   F.M = '1000111011101011000110001';
@@ -135,8 +135,8 @@
     n = Math.floor(n);
     if (n < 1000) return '' + n;
     var u = ['K', 'M', 'B', 'T', 'Q'], i = -1;
-    while (n >= 1000 && i < u.length - 1) { n /= 1000; i++; }
-    return (n < 100 ? n.toFixed(1) : '' + Math.floor(n)) + u[i];
+    while (n >= 1000) { n /= 1000; i++; }
+    return (n < 100 ? n.toFixed(1) : '' + Math.floor(n)) + (i < u.length ? u[i] : 'E' + (i + 1) * 3);
   }
 
   // ---------- Pantalla de fin de partida (común) ----------
@@ -172,12 +172,12 @@
     draw: function () {
       var l = this.layout(), p = P(), pn = Math.max(2, p - 1);
       col(GREY); T(offlineReady ? 'OFFLINE OK' : 'MINIJUEGOS', W / 2, H * 0.04, 2);
-      var ms = store.get('mine', null);
+      var ms = store.get('torre', null);
       var items = [
         ['ESCALERA', 'MEJOR ' + store.get('bestTorre', 0)],
         ['TALA', 'MEJOR ' + store.get('bestTala', 0)],
         ['SALTO', 'MEJOR ' + store.get('bestRun', 0)],
-        ['MINA', 'NIVEL ' + (ms ? ms.L + 1 : 1)]
+        ['TORRETA', 'OLA ' + (ms ? ms.wave : 1)]
       ];
       for (var i = 0; i < 4; i++) {
         var y = l.top + i * l.rowH, h = l.rowH - 5;
@@ -192,7 +192,7 @@
       var l = this.layout();
       if (y < l.top) return;
       var i = Math.min(3, Math.floor((y - l.top) / l.rowH));
-      go([stairs, tala, run, mine][i]);
+      go([stairs, tala, run, torre][i]);
     }
   };
 
@@ -510,106 +510,344 @@
   };
 
   // =====================================================
-  // MINA: funciona sola. El cuadrado excava y suma bloques, tambien con la pagina cerrada.
+  // TORRETA: idle infinito. Dispara sola; los enemigos llegan de todas partes.
+  // Las oleadas y las ofertas de la tienda se generan proceduralmente.
   // =====================================================
-  var COLS = 7, GEM_AVG = 1 + 9 / 23;
-  function isGem(k) {
-    var h = k | 0;
-    h = Math.imul(h ^ (h >>> 15), 2246822519); h ^= h >>> 13;
-    h = Math.imul(h, 3266489917); h ^= h >>> 16;
-    return (h >>> 0) % 23 === 0;
+  var WNAME = ['BALA', 'ONDA', 'ORBE', 'RAYO'];
+  var WBASE = [
+    { dmg: 6, rate: 2, x: 1 },      // bala: x = enemigos que atraviesa
+    { dmg: 5, rate: 0.4, x: 28 },   // onda: x = radio
+    { dmg: 30, rate: 1, x: 2 },     // orbe: x = numero de orbes
+    { dmg: 40, rate: 0.35, x: 0 }   // rayo
+  ];
+  var RATECAP = [12, 3, 1e9, 4];    // por encima, la cadencia extra se convierte en daño
+  var ETYPES = [
+    { s: 1, h: 1, z: 4, c: 1 },         // normal
+    { s: 1.9, h: 0.45, z: 3, c: 1.2 },  // rapido
+    { s: 0.55, h: 3.2, z: 6, c: 0.6 },  // tanque
+    { s: 1.2, h: 0.3, z: 2, c: 2.2 }    // enjambre
+  ];
+  var GLOB = [['VIDA', 20], ['REGEN', 30], ['ORO', 10]];
+  function seeded(n) {
+    var h = ((n + 7) * 2654435761) >>> 0;
+    return function () {
+      h ^= h << 13; h >>>= 0; h ^= h >>> 17; h ^= h << 5; h >>>= 0;
+      return h / 4294967296;
+    };
   }
-  function cellPos(k) {
-    var r = Math.floor(k / COLS), i = k % COLS;
-    return { r: r, c: (r % 2) ? COLS - 1 - i : i };
-  }
-  var mine = {
-    enter: function () { this.msg = ''; this.msgT = 0; this.saveT = 0; this.load(); },
+  function pick(a) { return a[Math.floor(Math.random() * a.length)]; }
+
+  var torre = {
+    enter: function () { this.shop = false; this.msg = ''; this.msgT = 0; this.saveT = 0; this.load(); },
+    fresh: function () {
+      return { g: 0, wave: 1, maxHp: 100, regen: 1, gm: 1, ws: [{ t: 0, dmg: 6, rate: 2, x: 1 }],
+               offers: [], buys: 0, inc: 0, t: Date.now() };
+    },
+    geom: function () {
+      this.k = W / 110; this.cx = W / 2; this.cy = H * 0.47;
+      this.R = Math.hypot(W / 2, H * 0.47) / this.k + 4;
+    },
     load: function () {
-      var s = store.get('mine', null) || { b: 0, L: 0, q: 0, t: Date.now() };
-      this.b = s.b; this.L = s.L; this.q = s.q;
-      var el = Math.min(12 * 3600, Math.max(0, (Date.now() - s.t) / 1000));
-      if (el > 3) {
-        var g = this.rate() * GEM_AVG * el;
-        this.b += g; this.q += this.vs() * el;
+      var s = store.get('torre', null) || this.fresh();
+      this.s = s;
+      var el = Math.min(8 * 3600, Math.max(0, (Date.now() - s.t) / 1000));
+      if (el > 5 && s.inc > 0) {
+        var g = s.inc * el * 0.5;
+        s.g += g;
         if (g >= 1) { this.msg = '+' + fmt(g); this.msgT = 3; }
+      }
+      while (s.offers.length < 3) s.offers.push(this.makeOffer());
+      this.hp = s.maxHp; this.cd = []; this.orbA = 0; this.aim = 0;
+      this.earn = 0; this.earnT = 0; this.eid = 0;
+      this.geom(); this.startWave(true);
+      this.save();
+    },
+    save: function () { this.s.t = Date.now(); store.set('torre', this.s); },
+
+    // ----- tienda procedural -----
+    baseCost: function () { return 15 * Math.pow(1.12, this.s.buys); },
+    cost: function (o) { return Math.floor(this.baseCost() * o.cm); },
+    rerollCost: function () { return Math.floor(this.baseCost() * 0.25); },
+    makeOffer: function () {
+      var s = this.s, r = Math.random();
+      var rar = r < 0.06 ? 2 : r < 0.3 ? 1 : 0, mag = [1, 2, 4][rar], cm = [1, 1.7, 2.8][rar];
+      var o = { rar: rar, cm: cm };
+      var missing = [0, 1, 2, 3].filter(function (t) {
+        return !s.ws.some(function (w) { return w.t === t; });
+      });
+      var k = Math.random();
+      if (missing.length && k < 0.22) {
+        o.kind = 'new'; o.t = pick(missing); o.mag = mag; o.cm = 3 * cm;
+        o.l1 = 'ARMA NUEVA'; o.l2 = WNAME[o.t] + (rar ? ' X' + mag : '');
+      } else if (k < 0.45) {
+        var gi = Math.floor(Math.random() * GLOB.length);
+        o.kind = 'glob'; o.st = gi; o.pct = GLOB[gi][1] * mag;
+        o.l1 = 'TORRETA'; o.l2 = GLOB[gi][0] + ' +' + o.pct + '%';
+      } else {
+        var wi = Math.floor(Math.random() * s.ws.length), w = s.ws[wi];
+        var opts = [['PODER', 'dmg', 40], ['RITMO', 'rate', 25]];
+        if (w.t === 0) opts.push(['PERFORA', 'n', 0]);
+        if (w.t === 1 && w.x < 70) opts.push(['RADIO', 'rad', 10]);
+        if (w.t === 2 && w.x < 8) opts.push(['ORBES', 'n', 0]);
+        var op = pick(opts);
+        o.kind = 'up'; o.wi = wi; o.stat = op[1]; o.l1 = WNAME[w.t];
+        if (op[1] === 'n') { o.rar = 1; o.cm = 2.2; o.l2 = op[0] + ' +1'; }
+        else { o.pct = op[2] * mag; o.l2 = op[0] + ' +' + o.pct + '%'; }
+      }
+      return o;
+    },
+    buy: function (i) {
+      var s = this.s, o = s.offers[i], c = this.cost(o);
+      if (s.g < c) return;
+      s.g -= c;
+      if (o.kind === 'new') {
+        var b = WBASE[o.t];
+        s.ws.push({ t: o.t, dmg: b.dmg * o.mag * Math.pow(1.06, s.buys), rate: b.rate, x: b.x });
+      } else if (o.kind === 'glob') {
+        var m = 1 + o.pct / 100;
+        if (o.st === 0) { s.maxHp *= m; this.hp = s.maxHp; }
+        else if (o.st === 1) s.regen *= m;
+        else s.gm *= m;
+      } else {
+        var w = s.ws[o.wi];
+        if (o.stat === 'dmg') w.dmg *= 1 + o.pct / 100;
+        else if (o.stat === 'rate') w.rate *= 1 + o.pct / 100;
+        else if (o.stat === 'rad') w.x *= 1 + o.pct / 100;
+        else w.x += 1;
+      }
+      s.buys++;
+      s.offers[i] = this.makeOffer();
+      // las ofertas que ya no tienen sentido se sustituyen
+      for (var j = 0; j < 3; j++) {
+        var q = s.offers[j], bad = false;
+        if (q.kind === 'new') bad = s.ws.some(function (w2) { return w2.t === q.t; });
+        if (q.kind === 'up' && q.stat === 'n' && s.ws[q.wi].t === 2 && s.ws[q.wi].x >= 8) bad = true;
+        if (q.kind === 'up' && q.stat === 'rad' && s.ws[q.wi].x >= 70) bad = true;
+        if (bad) s.offers[j] = this.makeOffer();
       }
       this.save();
     },
-    save: function () { store.set('mine', { b: this.b, L: this.L, q: this.q, t: Date.now() }); },
-    rate: function () { return 1.2 * Math.pow(1.2, this.L); },
-    vs: function () { return Math.min(this.rate(), 9); },
-    cost: function () { return Math.floor(15 * Math.pow(1.45, this.L)); },
+    reroll: function () {
+      var s = this.s, c = this.rerollCost();
+      if (s.g < c) return;
+      s.g -= c;
+      for (var j = 0; j < 3; j++) s.offers[j] = this.makeOffer();
+      this.save();
+    },
+
+    // ----- oleadas procedurales -----
+    startWave: function (quiet) {
+      var n = this.s.wave, rnd = seeded(n);
+      var a = ETYPES[Math.floor(rnd() * 4)], b = rnd() < 0.5 ? ETYPES[Math.floor(rnd() * 4)] : a;
+      var count = Math.round((6 + Math.min(24, n * 0.5)) * (a.c + b.c) / 2);
+      this.queue = [];
+      if (n % 5 === 0) this.queue.push({ s: 0.4, h: 15, z: 10, boss: 1 });
+      for (var i = 0; i < count; i++) this.queue.push(i % 2 ? b : a);
+      this.spT = 0.6; this.spI = 10 / this.queue.length;
+      this.ehp = 10 * Math.pow(1.13, n - 1);
+      this.edmg = 6 * Math.pow(1.10, n - 1);
+      this.egold = 2 * Math.pow(1.16, n - 1);
+      this.espd = 9 + Math.min(6, n * 0.05);
+      this.en = []; this.bul = []; this.fx = [];
+      if (!quiet) { this.msg = 'OLA ' + n; this.msgT = 1.2; }
+    },
     tap: function (x, y) {
+      if (this.shop) {
+        if (y >= H * 0.81) { if (x < W / 2) this.shop = false; else this.reroll(); return; }
+        var i = Math.floor((y - H * 0.1) / (H * 0.235));
+        if (i >= 0 && i < 3) this.buy(i);
+        return;
+      }
       if (y < H * 0.77) return;
       if (x < W * 0.4) { this.save(); go(menu); return; }
-      if (this.b >= this.cost()) {
-        this.b -= this.cost(); this.L++;
-        this.msg = 'NIVEL ' + (this.L + 1); this.msgT = 1.2;
-        this.save();
-      }
+      this.shop = true;
     },
     update: function (dt) {
-      var per = this.rate() / this.vs();
-      var k0 = Math.floor(this.q);
-      this.q += this.vs() * dt;
-      var k1 = Math.floor(this.q);
-      for (var k = k0 + 1; k <= k1; k++) this.b += per * (isGem(k) ? 10 : 1);
+      var s = this.s, en = this.en, i, j, e, d, w;
+      this.geom();
       this.msgT -= dt;
       this.saveT += dt;
       if (this.saveT > 5) { this.saveT = 0; this.save(); }
-    },
-    draw: function () {
-      var p = P();
-      var c = Math.floor(W * 0.88 / COLS), x0 = Math.round((W - c * COLS) / 2);
-      var gy0 = Math.round(H * 0.25), gy1 = Math.round(H * 0.76);
-      var k = Math.floor(this.q), f = this.q - k;
-      var a = cellPos(k), b = cellPos(k + 1);
-      var dx = a.c + (b.c - a.c) * f, dy = a.r + (b.r - a.r) * f;
-      var cam = dy - 1.2;
+      this.hp = Math.min(s.maxHp, this.hp + s.maxHp * 0.01 * s.regen * dt);
 
-      ctx.save();
-      ctx.beginPath(); ctx.rect(0, gy0, W, gy1 - gy0); ctx.clip();
-      col(WHITE);
-      var r0 = Math.max(0, Math.floor(cam)), rows = Math.ceil((gy1 - gy0) / c) + 1;
-      var sm = Math.max(2, Math.round(c * 0.36));
-      for (var r = r0; r <= r0 + rows; r++) {
-        var y = gy0 + (r - cam) * c;
-        for (var cc = 0; cc < COLS; cc++) {
-          var kk = r * COLS + ((r % 2) ? COLS - 1 - cc : cc);
-          if (kk <= k) continue;
-          var x = x0 + cc * c;
-          if (isGem(kk)) box(x + 3, y + 3, c - 6, c - 6, 2);
-          else R(x + (c - sm) / 2, y + (c - sm) / 2, sm, sm);
+      // aparicion: desde cualquier direccion, fuera de la pantalla
+      this.spT -= dt;
+      if (this.queue.length && this.spT <= 0 && en.length < 60) {
+        var t = this.queue.pop(), ang = Math.random() * Math.PI * 2;
+        en.push({ x: Math.cos(ang) * this.R, y: Math.sin(ang) * this.R, hp: this.ehp * t.h, z: t.z,
+                  sp: this.espd * t.s, g: this.egold * t.h, d: this.edmg * t.z / 4, boss: t.boss, id: ++this.eid });
+        this.spT = this.spI;
+      }
+      var near = null, nd = 1e9;
+      for (i = 0; i < en.length; i++) {
+        e = en[i]; d = Math.hypot(e.x, e.y);
+        if (d < 5 + e.z / 2) { this.hp -= e.d; e.hp = 0; e.ng = 1; continue; }
+        e.x -= e.x / d * e.sp * dt; e.y -= e.y / d * e.sp * dt;
+        e.dist = d;
+        if (d < nd && d < this.R - 4) { nd = d; near = e; }
+      }
+
+      // armas
+      this.orbA += 2.5 * dt;
+      for (i = 0; i < s.ws.length; i++) {
+        w = s.ws[i];
+        var r = Math.min(w.rate, RATECAP[w.t]), dm = w.dmg * w.rate / r;
+        this.cd[i] = (this.cd[i] || 0) - dt;
+        if (w.t === 0) {
+          if (this.cd[i] <= 0 && near) {
+            this.aim = Math.atan2(near.y, near.x);
+            this.bul.push({ x: 0, y: 0, vx: Math.cos(this.aim) * 130, vy: Math.sin(this.aim) * 130, dmg: dm, p: w.x, last: 0 });
+            this.cd[i] = 1 / r;
+          }
+        } else if (w.t === 1) {
+          if (this.cd[i] <= 0 && near && nd < w.x) {
+            for (j = 0; j < en.length; j++) if (en[j].dist < w.x) en[j].hp -= dm;
+            this.fx.push({ k: 1, r: w.x, t: 0.3 });
+            this.cd[i] = 1 / r;
+          }
+        } else if (w.t === 2) {
+          for (var o = 0; o < w.x; o++) {
+            var oa = this.orbA + o * Math.PI * 2 / w.x, ox = Math.cos(oa) * 20, oy = Math.sin(oa) * 20;
+            for (j = 0; j < en.length; j++) {
+              e = en[j];
+              if (Math.abs(e.x - ox) < 3 + e.z / 2 && Math.abs(e.y - oy) < 3 + e.z / 2) e.hp -= dm * dt;
+            }
+          }
+        } else if (this.cd[i] <= 0) {
+          var best = null;
+          for (j = 0; j < en.length; j++)
+            if (en[j].hp > 0 && en[j].dist < this.R - 6 && (!best || en[j].hp > best.hp)) best = en[j];
+          if (best) {
+            best.hp -= dm;
+            this.fx.push({ k: 2, x: best.x, y: best.y, t: 0.12 });
+            this.cd[i] = 1 / r;
+          }
         }
       }
-      R(x0 + dx * c + 1, gy0 + (dy - cam) * c + 1, c - 2, c - 2);
-      ctx.restore();
+
+      // balas
+      for (i = this.bul.length - 1; i >= 0; i--) {
+        var b = this.bul[i];
+        b.x += b.vx * dt; b.y += b.vy * dt;
+        for (j = 0; j < en.length && b.p > 0; j++) {
+          e = en[j];
+          if (e.hp > 0 && e.id !== b.last && Math.abs(e.x - b.x) < e.z / 2 + 2 && Math.abs(e.y - b.y) < e.z / 2 + 2) {
+            e.hp -= b.dmg; b.last = e.id; b.p--;
+          }
+        }
+        if (b.p <= 0 || Math.hypot(b.x, b.y) > this.R + 5) this.bul.splice(i, 1);
+      }
+
+      // bajas y oro
+      for (i = en.length - 1; i >= 0; i--) {
+        e = en[i];
+        if (e.hp > 0) continue;
+        if (!e.ng) { var gain = e.g * s.gm * (e.boss ? 10 / 15 * 1.5 : 1); s.g += gain; this.earn += gain; }
+        en.splice(i, 1);
+      }
+      for (i = this.fx.length - 1; i >= 0; i--) { this.fx[i].t -= dt; if (this.fx[i].t <= 0) this.fx.splice(i, 1); }
+
+      this.earnT += dt;
+      if (this.earnT >= 10) {
+        var rate = this.earn / this.earnT;
+        s.inc = s.inc ? s.inc * 0.7 + rate * 0.3 : rate;
+        this.earn = 0; this.earnT = 0;
+      }
+
+      if (this.hp <= 0) {            // la torreta cae: retrocede una oleada y sigue
+        s.wave = Math.max(1, s.wave - 1);
+        this.hp = s.maxHp;
+        this.startWave(true);
+        this.msg = 'CAIDA'; this.msgT = 1.2;
+      } else if (!this.queue.length && !en.length) {
+        s.wave++;
+        this.startWave();
+      }
+    },
+    draw: function () {
+      var s = this.s, k = this.k, cx = this.cx, cy = this.cy, p = P(), i, e, z;
+      col(WHITE);
+      for (i = 0; i < this.en.length; i++) {
+        e = this.en[i]; z = Math.max(2, e.z * k);
+        if (e.boss) box(cx + e.x * k - z / 2, cy + e.y * k - z / 2, z, z, 2);
+        else R(cx + e.x * k - z / 2, cy + e.y * k - z / 2, z, z);
+      }
+      for (i = 0; i < this.bul.length; i++) R(cx + this.bul[i].x * k - 1, cy + this.bul[i].y * k - 1, 2, 2);
+      for (i = 0; i < s.ws.length; i++) {
+        if (s.ws[i].t !== 2) continue;
+        for (var o = 0; o < s.ws[i].x; o++) {
+          var oa = this.orbA + o * Math.PI * 2 / s.ws[i].x;
+          R(cx + Math.cos(oa) * 20 * k - 2, cy + Math.sin(oa) * 20 * k - 2, 4, 4);
+        }
+      }
+      for (i = 0; i < this.fx.length; i++) {
+        var f = this.fx[i], j;
+        if (f.k === 1) {
+          var rr = f.r * k * (1 - f.t / 0.3);
+          col(GREY);
+          for (j = 0; j < 20; j++) R(cx + Math.cos(j * 0.314) * rr - 1, cy + Math.sin(j * 0.314) * rr - 1, 2, 2);
+        } else {
+          var len = Math.hypot(f.x, f.y) * k, n = Math.max(1, Math.floor(len / 4));
+          col(WHITE);
+          for (j = 1; j <= n; j++) R(cx + f.x * k * j / n - 1, cy + f.y * k * j / n - 1, 3, 3);
+        }
+      }
+      // torreta (hueca) con cañon
+      var ts = Math.round(8 * k);
+      col('#000'); R(cx - ts / 2, cy - ts / 2, ts, ts);
+      col(WHITE); box(cx - ts / 2, cy - ts / 2, ts, ts, 2);
+      R(cx + Math.cos(this.aim) * 6 * k - 2, cy + Math.sin(this.aim) * 6 * k - 2, 4, 4);
 
       // marcador
-      col(WHITE); T(fmt(this.b), W / 2, H * 0.05, p);
-      var er = this.rate() * GEM_AVG;
-      col(GREY); T('+' + (er < 100 ? er.toFixed(1) : fmt(er)) + '/S', W / 2, H * 0.05 + 5 * p + 4, 2);
+      var gt = fmt(s.g), gw2 = Math.max(tw(gt, p), W * 0.5) + 8;
+      col('#000'); R(cx - gw2 / 2, 0, gw2, H * 0.04 + 5 * p + 22);
+      col(WHITE); T(gt, cx, H * 0.04, p);
+      col(GREY); T('OLA ' + s.wave, cx, H * 0.04 + 5 * p + 3, 2);
+      var bw = W * 0.5, by0 = H * 0.04 + 5 * p + 16;
+      col(GREY); box(cx - bw / 2, by0, bw, 4, 1);
+      col(WHITE); R(cx - bw / 2, by0, Math.max(0.01, bw * Math.max(0, this.hp) / s.maxHp), 4);
 
-      if (this.msgT > 0) {
+      if (this.msgT > 0 && !this.shop) {
         var mw = tw(this.msg, p) + 12;
-        col('#000'); R(W / 2 - mw / 2, H * 0.44, mw, 5 * p + 12);
-        col(WHITE); box(W / 2 - mw / 2, H * 0.44, mw, 5 * p + 12, 1);
-        T(this.msg, W / 2, H * 0.44 + 6, p);
+        col('#000'); R(cx - mw / 2, H * 0.62, mw, 5 * p + 12);
+        col(WHITE); box(cx - mw / 2, H * 0.62, mw, 5 * p + 12, 1);
+        T(this.msg, cx, H * 0.62 + 6, p);
       }
 
       // botones
-      var by = H * 0.79, bh = H * 0.15, m = W * 0.06;
-      col(GREY);
-      box(m, by, W * 0.3, bh, 1);
+      var by = H * 0.8, bh = H * 0.14, m = W * 0.06, self = this;
+      col('#000'); R(0, by - 3, W, H - by + 3);
+      col(GREY); box(m, by, W * 0.3, bh, 1);
       T('MENU', m + W * 0.15, by + bh / 2 - 5, 2);
-      var can = this.b >= this.cost();
+      var can = s.offers.some(function (q) { return s.g >= self.cost(q); });
       var ux = m + W * 0.3 + 4, uw = W - m - ux;
       col(can ? WHITE : GREY);
       if (can) R(ux, by, uw, bh); else box(ux, by, uw, bh, 1);
       col(can ? '#000' : GREY);
-      T('MEJORA', ux + uw / 2, by + bh / 2 - 12, 2);
-      T(fmt(this.cost()), ux + uw / 2, by + bh / 2 + 2, 2);
+      T('TIENDA', ux + uw / 2, by + bh / 2 - 5, 2);
+
+      if (this.shop) this.drawShop();
+    },
+    drawShop: function () {
+      var s = this.s, i;
+      ctx.fillStyle = 'rgba(0,0,0,0.93)'; ctx.fillRect(0, 0, W, H);
+      col(WHITE); T(fmt(s.g), W / 2, H * 0.03, 2);
+      for (i = 0; i < 3; i++) {
+        var o = s.offers[i], y = H * 0.1 + i * H * 0.235, h = H * 0.215, c = this.cost(o), can = s.g >= c;
+        col(o.rar ? WHITE : GREY); box(W * 0.05, y, W * 0.9, h, o.rar === 2 ? 3 : 1);
+        col(can ? WHITE : GREY);
+        T(o.l1, W / 2, y + h * 0.12, 2);
+        T(o.l2, W / 2, y + h * 0.12 + 13, 2);
+        if (can) { var cw = tw(fmt(c), 2) + 8; R(W / 2 - cw / 2, y + h * 0.12 + 24, cw, 14); col('#000'); }
+        T(fmt(c), W / 2, y + h * 0.12 + 26, 2);
+      }
+      var by = H * 0.83, bh = H * 0.13, m = W * 0.05, half = (W - 2 * m - 4) / 2;
+      col(GREY); box(m, by, half, bh, 1);
+      T('CERRAR', m + half / 2, by + bh / 2 - 5, 2);
+      var rc = this.rerollCost(), can2 = s.g >= rc;
+      col(can2 ? WHITE : GREY); box(m + half + 4, by, half, bh, 1);
+      T('CAMBIAR', m + half + 4 + half / 2, by + bh / 2 - 11, 2);
+      T(fmt(rc), m + half + 4 + half / 2, by + bh / 2 + 2, 2);
     }
   };
 
@@ -618,10 +856,10 @@
   function go(s) { scene = s; s.enter(); }
 
   document.addEventListener('visibilitychange', function () {
-    if (scene !== mine) return;
-    if (document.hidden) mine.save(); else mine.load();
+    if (scene !== torre) return;
+    if (document.hidden) torre.save(); else torre.load();
   });
-  window.addEventListener('pagehide', function () { if (scene === mine) mine.save(); });
+  window.addEventListener('pagehide', function () { if (scene === torre) torre.save(); });
 
   // ---------- Entrada ----------
   function down(cx, cy) {
@@ -644,7 +882,7 @@
   // teclado, para probar en el ordenador
   document.addEventListener('keydown', function (e) {
     if (e.repeat) return;
-    if (e.key === 'Escape') { if (scene === mine) mine.save(); go(menu); return; }
+    if (e.key === 'Escape') { if (scene === torre) torre.save(); go(menu); return; }
     var k = e.key;
     if (scene === stairs && k.indexOf('Arrow') === 0) {
       stairs.move(k === 'ArrowLeft' || k === 'ArrowDown' ? -1 : 1, 0);
@@ -653,7 +891,7 @@
     } else if (e.key === ' ' || e.key === 'ArrowUp' || e.key === 'Enter') {
       if (scene !== menu) scene.tap(W / 2, H / 2);
     } else if (scene === menu && e.key >= '1' && e.key <= '4') {
-      go([stairs, tala, run, mine][+e.key - 1]);
+      go([stairs, tala, run, torre][+e.key - 1]);
     }
   });
 
@@ -671,7 +909,7 @@
   requestAnimationFrame(frame);
 
   // para pruebas
-  window.__mj = { go: go, menu: menu, stairs: stairs, tala: tala, run: run, mine: mine, scene: function () { return scene; } };
+  window.__mj = { go: go, menu: menu, stairs: stairs, tala: tala, run: run, torre: torre, scene: function () { return scene; } };
 })();
 </script>
 </body>
