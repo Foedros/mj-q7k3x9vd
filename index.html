@@ -120,6 +120,19 @@
     }
   };
 
+  // ---------- Version y actualizacion ----------
+  // Subir este numero en cada cambio: se ve en el menu y fuerza la recarga.
+  var VERSION = '6';
+  try {
+    fetch('./index.html?nc=' + Date.now(), { cache: 'no-store' })
+      .then(function (r) { return r.ok ? r.text() : ''; })
+      .then(function (t) {
+        var m = /var VERSION = '(\w+)'/.exec(t);
+        if (m && m[1] !== VERSION) location.replace('./?v=' + m[1]);
+      })
+      .catch(function () {});
+  } catch (e) {}
+
   // ---------- Copia sin conexion ----------
   var offlineReady = false;
   if ('serviceWorker' in navigator) {
@@ -171,7 +184,7 @@
     },
     draw: function () {
       var l = this.layout(), p = P(), pn = Math.max(2, p - 1);
-      col(GREY); T(offlineReady ? 'OFFLINE OK' : 'MINIJUEGOS', W / 2, H * 0.04, 2);
+      col(GREY); T((offlineReady ? 'OFFLINE OK' : 'MINIJUEGOS') + ' V' + VERSION, W / 2, H * 0.04, 2);
       var ms = store.get('torre', null);
       var items = [
         ['ESCALERA', 'MEJOR ' + store.get('bestTorre', 0)],
