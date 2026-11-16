@@ -1,0 +1,666 @@
+<!doctype html>
+<html lang="es">
+<head>
+<meta charset="utf-8">
+<title>Minijuegos</title>
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover">
+<!-- Hace que el Apple Watch use su ancho real en vez de simular un iPhone -->
+<meta name="disabled-adaptations" content="watch">
+<meta name="theme-color" content="#000000">
+<style>
+  html, body {
+    margin: 0; padding: 0; width: 100%; height: 100%;
+    background: #000; overflow: hidden; position: fixed;
+    touch-action: none;
+    -webkit-user-select: none; user-select: none;
+    -webkit-touch-callout: none; -webkit-tap-highlight-color: transparent;
+  }
+  body { display: flex; align-items: center; justify-content: center; }
+  canvas { display: block; background: #000; image-rendering: pixelated; }
+</style>
+</head>
+<body>
+<canvas id="c"></canvas>
+<script>
+(function () {
+  'use strict';
+
+  // ---------- Lienzo ----------
+  var cv = document.getElementById('c');
+  var ctx = cv.getContext('2d');
+  var W = 176, H = 215, S = 1;
+
+  function resize() {
+    var iw = window.innerWidth, ih = window.innerHeight;
+    var dpr = window.devicePixelRatio || 1, k = 1;
+    if (iw <= 500) {            // reloj o móvil: pantalla completa
+      W = iw;
+      H = Math.min(ih, Math.round(iw * 1.45));
+    } else {                    // ordenador: marco con tamaño de reloj, ampliado
+      W = 198; H = 242;
+      k = Math.max(1, Math.floor(Math.min(iw / W, ih / H)));
+    }
+    cv.style.width = (W * k) + 'px';
+    cv.style.height = (H * k) + 'px';
+    cv.width = Math.round(W * k * dpr);
+    cv.height = Math.round(H * k * dpr);
+    S = k * dpr;
+  }
+  window.addEventListener('resize', resize);
+  resize();
+
+  var WHITE = '#fff', GREY = '#777';
+  function col(c) { ctx.fillStyle = c; }
+  function R(x, y, w, h) {
+    ctx.fillRect(Math.round(x), Math.round(y), Math.max(1, Math.round(w)), Math.max(1, Math.round(h)));
+  }
+  function box(x, y, w, h, t) {
+    t = t || 1;
+    R(x, y, w, t); R(x, y + h - t, w, t); R(x, y, t, h); R(x + w - t, y, t, h);
+  }
+
+  // ---------- Letras hechas de cuadraditos (3x5) ----------
+  var F = {
+    A: '010101111101101', B: '110101110101110', C: '011100100100011', D: '110101101101110',
+    E: '111100110100111', F: '111100110100100', G: '011100101101011', H: '101101111101101',
+    I: '111010010010111', J: '001001001101010', K: '101101110101101', L: '100100100100111',
+    M: '101111111101101', N: '110101101101101', O: '010101101101010', P: '110101110100100',
+    Q: '010101101110011', R: '110101110101101', S: '011100010001110', T: '111010010010010',
+    U: '101101101101111', V: '101101101101010', W: '101101111111101', X: '101101010101101',
+    Y: '101101010010010', Z: '111001010100111',
+    '0': '111101101101111', '1': '010110010010111', '2': '110001010100111', '3': '110001010001110',
+    '4': '101101111001001', '5': '111100110001110', '6': '011100111101111', '7': '111001010010010',
+    '8': '111101111101111', '9': '111101111001110',
+    '+': '000010111010000', '-': '000000111000000', '.': '000000000000010',
+    '<': '001010100010001', '>': '100010001010100', '!': '010010010000010',
+    '/': '001001010100100'
+  };
+  // M y W necesitan 5 de ancho para no confundirse con N y H
+  F.M = '1000111011101011000110001';
+  F.W = '1000110001101011101110001';
+  function gw(ch) { var g = F[ch]; return g ? g.length / 5 : 3; }
+  function tw(s, p) {
+    s = String(s);
+    var n = 0;
+    for (var i = 0; i < s.length; i++) n += gw(s.charAt(i)) + 1;
+    return (n - 1) * p;
+  }
+  // al: 0 centrado, -1 izquierda, 1 derecha
+  function T(s, x, y, p, al) {
+    s = String(s);
+    var w = tw(s, p);
+    var x0 = Math.round(al === 1 ? x - w : al === -1 ? x : x - w / 2);
+    y = Math.round(y);
+    for (var i = 0; i < s.length; i++) {
+      var ch = s.charAt(i), g = F[ch], n = gw(ch);
+      if (g)
+        for (var r = 0; r < 5; r++)
+          for (var c = 0; c < n; c++)
+            if (g.charAt(r * n + c) === '1') ctx.fillRect(x0 + c * p, y + r * p, p, p);
+      x0 += (n + 1) * p;
+    }
+  }
+  function P() { return Math.max(2, Math.floor(W / 44)); }
+
+  // ---------- Guardado ----------
+  var mem = {};
+  var store = {
+    get: function (k, d) {
+      if (k in mem) return mem[k];
+      try {
+        var v = localStorage.getItem('mj_' + k);
+        if (v != null) { mem[k] = JSON.parse(v); return mem[k]; }
+      } catch (e) {}
+      return d;
+    },
+    set: function (k, v) {
+      mem[k] = v;
+      try { localStorage.setItem('mj_' + k, JSON.stringify(v)); } catch (e) {}
+    }
+  };
+
+  function fmt(n) {
+    n = Math.floor(n);
+    if (n < 1000) return '' + n;
+    var u = ['K', 'M', 'B', 'T', 'Q'], i = -1;
+    while (n >= 1000 && i < u.length - 1) { n /= 1000; i++; }
+    return (n < 100 ? n.toFixed(1) : '' + Math.floor(n)) + u[i];
+  }
+
+  // ---------- Pantalla de fin de partida (común) ----------
+  function drawOver(score, best, isNew) {
+    var p = P();
+    ctx.fillStyle = 'rgba(0,0,0,0.86)';
+    ctx.fillRect(0, 0, W, H);
+    col(GREY);  T(isNew ? 'RECORD!' : 'FIN', W / 2, H * 0.08, p);
+    col(WHITE); T(score, W / 2, H * 0.22, p + 2);
+    col(GREY);  T('MEJOR ' + best, W / 2, H * 0.44, Math.max(2, p - 1));
+    col(WHITE);
+    var bx = W * 0.14, bw = W * 0.72;
+    box(bx, H * 0.56, bw, H * 0.16, 2);
+    T('OTRA', W / 2, H * 0.64 - 2.5 * p, p);
+    col(GREY);
+    box(bx, H * 0.77, bw, H * 0.15, 1);
+    T('MENU', W / 2, H * 0.845 - 2.5 * (p - 1), Math.max(2, p - 1));
+  }
+  function overTap(y, retry) {
+    if (y > H * 0.745) go(menu); else retry();
+  }
+
+  // =====================================================
+  // MENU
+  // =====================================================
+  var menu = {
+    enter: function () {},
+    update: function () {},
+    layout: function () {
+      var top = H * 0.13;
+      return { top: top, rowH: (H * 0.84) / 4 };
+    },
+    draw: function () {
+      var l = this.layout(), p = P(), pn = Math.max(2, p - 1);
+      col(GREY); T('MINIJUEGOS', W / 2, H * 0.04, 2);
+      var ms = store.get('mine', null);
+      var items = [
+        ['ESCALERA', 'MEJOR ' + store.get('bestTorre', 0)],
+        ['TALA', 'MEJOR ' + store.get('bestTala', 0)],
+        ['SALTO', 'MEJOR ' + store.get('bestRun', 0)],
+        ['MINA', 'NIVEL ' + (ms ? ms.L + 1 : 1)]
+      ];
+      for (var i = 0; i < 4; i++) {
+        var y = l.top + i * l.rowH, h = l.rowH - 5;
+        col(WHITE);
+        box(W * 0.07, y, W * 0.86, h, 1);
+        T(items[i][0], W / 2, y + h * 0.5 - 5 * pn - 1, pn);
+        col(GREY);
+        T(items[i][1], W / 2, y + h * 0.5 + 4, 2);
+      }
+    },
+    tap: function (x, y) {
+      var l = this.layout();
+      if (y < l.top) return;
+      var i = Math.min(3, Math.floor((y - l.top) / l.rowH));
+      go([stairs, tala, run, mine][i]);
+    }
+  };
+
+  // =====================================================
+  // ESCALERA: escalera de caracol. Sube o baja para que no te caigan los escombros.
+  // La torre gira contigo: tu cuadrado siempre esta delante, en el centro.
+  // =====================================================
+  var NS = 12; // peldaños por vuelta
+  var stairs = {
+    enter: function () {
+      this.pos = 0; this.cam = 0; this.score = 0; this.t = 0;
+      this.deb = []; this.next = 1.2; this.hop = 0;
+      this.dead = false; this.deadT = 0; this.isNew = false;
+    },
+    hs: function () { return Math.max(5, Math.round(H * 0.03)); },
+    tap: function (x, y) { this.move(x < W / 2 ? -1 : 1, y); },
+    move: function (d, y) {
+      if (this.dead) {
+        if (this.deadT < 0.45) return;
+        var self = this;
+        overTap(y == null ? 0 : y, function () { self.enter(); });
+        return;
+      }
+      this.pos += d; this.hop = 1;
+      this.check();
+    },
+    die: function () {
+      this.dead = true; this.deadT = 0;
+      var b = store.get('bestTorre', 0);
+      if (this.score > b) { store.set('bestTorre', this.score); this.isNew = true; }
+    },
+    spawn: function () {
+      var maxK = this.score > 25 ? 3 : this.score > 8 ? 2 : 1;
+      var k = 1 + Math.floor(Math.random() * maxK);
+      var off = Math.random() < 0.5 ? 0 : Math.floor(Math.random() * 5) - 2;
+      var a = this.pos + off - Math.floor(Math.random() * k);
+      this.deb.push({ a: a, k: k, h: this.pos + (H * 0.62) / this.hs() + 3, done: false });
+    },
+    covers: function (d, slot) {
+      for (var j = 0; j < d.k; j++)
+        if ((((d.a + j - slot) % NS) + NS) % NS === 0) return true;
+      return false;
+    },
+    check: function () {
+      if (this.dead) return;
+      for (var i = 0; i < this.deb.length; i++) {
+        var d = this.deb[i];
+        if (d.h < this.pos + 1.4 && d.h + 1.6 > this.pos + 0.2 && this.covers(d, this.pos)) {
+          this.die(); return;
+        }
+      }
+    },
+    update: function (dt) {
+      this.hop = Math.max(0, this.hop - dt * 9);
+      this.cam += (this.pos - this.cam) * Math.min(1, dt * 14);
+      if (this.dead) { this.deadT += dt; return; }
+      this.t += dt;
+      var speed = Math.min(26, 11 + this.score * 0.25);
+      this.next -= dt;
+      if (this.next <= 0) {
+        this.spawn();
+        this.next = Math.max(0.42, 1.15 - this.score * 0.012);
+      }
+      for (var i = this.deb.length - 1; i >= 0; i--) {
+        var d = this.deb[i];
+        d.h -= speed * dt;
+        if (!d.done && d.h + 1.6 < this.pos - 0.5) { d.done = true; this.score++; }
+        if (d.h < this.pos - 22) this.deb.splice(i, 1);
+      }
+      this.check();
+    },
+    drawDebris: function (front, cx, Rx, py, hs, da) {
+      var bs = Math.round(hs * 1.6);
+      for (var i = 0; i < this.deb.length; i++) {
+        var d = this.deb[i];
+        for (var j = 0; j < d.k; j++) {
+          var th = (d.a + j - this.cam) * da;
+          if ((Math.cos(th) >= 0) !== front) continue;
+          var x = cx + Rx * Math.sin(th), yb = py - (d.h - this.cam) * hs;
+          if (front) R(x - bs / 2, yb - bs, bs, bs);
+          else R(x - bs / 4, yb - bs * 0.75, bs / 2, bs / 2);
+        }
+      }
+    },
+    draw: function () {
+      var hs = this.hs(), cx = W / 2, Rx = W * 0.3, py = Math.round(H * 0.62);
+      var cam = this.cam, da = 2 * Math.PI / NS, p = P();
+      var s0 = Math.floor(cam - (H - py) / hs - 2), s1 = Math.ceil(cam + py / hs + 2);
+      var s, th, cz, x, y, w;
+
+      // parte de atras
+      col('#555');
+      for (s = s0; s <= s1; s++) {
+        th = (s - cam) * da; cz = Math.cos(th);
+        if (cz >= 0) continue;
+        w = W * 0.06;
+        R(cx + Rx * Math.sin(th) - w / 2, py - (s - cam) * hs, w, 2);
+      }
+      this.drawDebris(false, cx, Rx, py, hs, da);
+
+      // columna central
+      var pw = Math.round(Rx * 0.5);
+      col('#000'); R(cx - pw / 2, 0, pw, H);
+      col('#555'); R(cx - pw / 2, 0, 1, H); R(cx + pw / 2, 0, 1, H);
+
+      // parte de delante
+      col(WHITE);
+      for (s = s0; s <= s1; s++) {
+        th = (s - cam) * da; cz = Math.cos(th);
+        if (cz < 0) continue;
+        w = W * (0.07 + 0.06 * cz);
+        R(cx + Rx * Math.sin(th) - w / 2, py - (s - cam) * hs, w, 3);
+      }
+      this.drawDebris(true, cx, Rx, py, hs, da);
+
+      // jugador (hueco por dentro para distinguirlo de los escombros)
+      var ps = Math.round(hs * 1.9);
+      if (!(this.dead && Math.floor(this.deadT * 10) % 2 && this.deadT < 0.45)) {
+        var pyy = py - ps - this.hop * 3;
+        col('#000'); R(cx - ps / 2 - 1, pyy - 1, ps + 2, ps + 1);
+        col(WHITE); box(cx - ps / 2, pyy, ps, ps, 3);
+      }
+
+      // marcador
+      var sw = tw(this.score, p);
+      col('#000'); R(cx - sw / 2 - 3, H * 0.05 - 3, sw + 6, 5 * p + 6);
+      col(WHITE); T(this.score, cx, H * 0.05, p);
+
+      if (this.t < 5 && !this.dead) {
+        col(GREY);
+        T('BAJA', W * 0.2, H * 0.9, 2);
+        T('SUBE', W * 0.8, H * 0.9, 2);
+      }
+      if (this.dead && this.deadT > 0.45) drawOver(this.score, store.get('bestTorre', 0), this.isNew);
+    }
+  };
+
+  // =====================================================
+  // TALA: el cuadrado tala solo. Toca izquierda o derecha para cambiar de lado
+  // antes de que te baje una rama encima.
+  // =====================================================
+  var tala = {
+    enter: function () {
+      this.segs = [0, 0, 0]; this.side = -1; this.score = 0;
+      this.cd = 1.3; this.iv = 1.3; this.drop = 0; this.swing = 0; this.chips = [];
+      this.dead = false; this.deadT = 0; this.isNew = false;
+      this.gen();
+    },
+    gen: function () {
+      while (this.segs.length < 12) {
+        var last = this.segs[this.segs.length - 1];
+        this.segs.push(last !== 0 ? 0 : (Math.random() < 0.25 ? 0 : (Math.random() < 0.5 ? -1 : 1)));
+      }
+    },
+    interval: function () { return Math.max(0.2, 0.6 - this.score * 0.004); },
+    die: function () {
+      this.dead = true; this.deadT = 0;
+      var b = store.get('bestTala', 0);
+      if (this.score > b) { store.set('bestTala', this.score); this.isNew = true; }
+    },
+    tap: function (x, y) {
+      if (this.dead) {
+        if (this.deadT < 0.45) return;
+        var self = this;
+        overTap(y, function () { self.enter(); });
+        return;
+      }
+      this.setSide(x < W / 2 ? -1 : 1);
+    },
+    setSide: function (s) {
+      if (this.dead) return;
+      this.side = s;
+      if (this.segs[0] === s) this.die();
+    },
+    chop: function () {
+      var b = this.segs.shift();
+      this.chips.push({ x: 0, y: 0, vx: -this.side * W * 1.3, vy: -H * 0.6, b: b });
+      this.score++; this.gen();
+      this.drop = 1; this.swing = 1;
+      this.iv = this.cd = this.interval();
+      if (this.segs[0] === this.side) this.die();
+    },
+    update: function (dt) {
+      this.drop = Math.max(0, this.drop - dt * 10);
+      this.swing = Math.max(0, this.swing - dt * 8);
+      for (var i = this.chips.length - 1; i >= 0; i--) {
+        var c = this.chips[i];
+        c.vy += H * 3.5 * dt; c.x += c.vx * dt; c.y += c.vy * dt;
+        if (c.y > H || Math.abs(c.x) > W) this.chips.splice(i, 1);
+      }
+      if (this.dead) { this.deadT += dt; return; }
+      this.cd -= dt;
+      if (this.cd <= 0) this.chop();
+    },
+    drawSeg: function (x, y, b, sh, twd) {
+      R(x, y, twd, sh - 1);
+      if (b) {
+        var bw = W * 0.2, bh = Math.max(3, Math.round(sh * 0.34));
+        R(b < 0 ? x - bw : x + twd, y + (sh - bh) / 2, bw, bh);
+      }
+    },
+    draw: function () {
+      var cx = W / 2, p = P();
+      var sh = Math.round(H * 0.105), twd = Math.round(W * 0.2), gy = Math.round(H * 0.84);
+      var off = this.drop * sh, tx = Math.round(cx - twd / 2), i;
+      col(WHITE);
+      R(0, gy, W, 2);
+      for (i = 0; i < this.segs.length; i++) {
+        var y = gy - (i + 1) * sh - off;
+        if (y + sh < 0) break;
+        this.drawSeg(tx, y, this.segs[i], sh, twd);
+      }
+      for (i = 0; i < this.chips.length; i++) {
+        var c = this.chips[i];
+        this.drawSeg(tx + c.x, gy - sh + c.y, c.b, sh, twd);
+      }
+      // leñador
+      var ps = Math.round(sh * 0.7);
+      var px = this.side < 0 ? tx - 5 - ps : tx + twd + 5;
+      if (!(this.dead && Math.floor(this.deadT * 10) % 2 && this.deadT < 0.45)) R(px, gy - ps, ps, ps);
+      if (this.swing > 0) R(this.side < 0 ? px + ps : tx + twd, gy - ps * 0.65, 5, 3);
+
+      // ritmo del siguiente hachazo
+      col(GREY);
+      if (!this.dead) R(W * 0.2, gy + 7, W * 0.6 * Math.max(0, 1 - this.cd / this.iv), 3);
+
+      // marcador
+      var sw = tw(this.score, p);
+      col('#000'); R(cx - sw / 2 - 4, H * 0.05 - 4, sw + 8, 5 * p + 8);
+      col(WHITE); T(this.score, cx, H * 0.05, p);
+
+      if (this.score < 3 && !this.dead) {
+        col(GREY);
+        T('<', W * 0.1, gy + 6, 2);
+        T('>', W * 0.9, gy + 6, 2);
+      }
+      if (this.dead && this.deadT > 0.45) drawOver(this.score, store.get('bestTala', 0), this.isNew);
+    }
+  };
+
+  // =====================================================
+  // SALTO: un toque para saltar. Los bloques que vuelan se pasan por debajo.
+  // =====================================================
+  var run = {
+    enter: function () {
+      this.y = 0; this.vy = 0; this.buf = 0;
+      this.obs = []; this.dist = 0; this.speed = 9.5; this.next = 13;
+      this.dead = false; this.deadT = 0; this.t = 0; this.isNew = false;
+    },
+    score: function () { return Math.floor(this.dist / 3); },
+    tap: function (x, y) {
+      if (this.dead) {
+        if (this.deadT < 0.45) return;
+        var self = this;
+        overTap(y, function () { self.enter(); });
+        return;
+      }
+      this.buf = 0.12;
+    },
+    update: function (dt) {
+      if (this.dead) { this.deadT += dt; return; }
+      this.t += dt;
+      this.speed = Math.min(22, 9.5 + this.dist * 0.012);
+      this.dist += this.speed * dt;
+
+      this.buf -= dt;
+      if (this.buf > 0 && this.y === 0) { this.vy = 23.3; this.buf = 0; }
+      if (this.y > 0 || this.vy > 0) {
+        this.vy -= 84.6 * dt;
+        this.y += this.vy * dt;
+        if (this.y <= 0) { this.y = 0; this.vy = 0; }
+      }
+
+      this.next -= this.speed * dt;
+      if (this.next <= 0) {
+        var o, r = Math.random();
+        if (this.score() > 60 && r < 0.2) o = { w: 1.6, h: 0.9, alt: 1.4 };
+        else if (r < 0.5) o = { w: 1, h: 1, alt: 0 };
+        else if (r < 0.75) o = { w: 1, h: 2, alt: 0 };
+        else o = { w: 2, h: 1, alt: 0 };
+        o.x = 15;
+        this.obs.push(o);
+        this.next = this.speed * (0.72 + Math.random() * 0.75) + o.w;
+      }
+      var px0 = 2.62, px1 = 3.38, py0 = this.y + 0.1, py1 = this.y + 0.9;
+      for (var i = this.obs.length - 1; i >= 0; i--) {
+        var ob = this.obs[i];
+        ob.x -= this.speed * dt;
+        if (ob.x + ob.w < -1) { this.obs.splice(i, 1); continue; }
+        if (px1 > ob.x && px0 < ob.x + ob.w && py1 > ob.alt && py0 < ob.alt + ob.h) {
+          this.dead = true; this.deadT = 0;
+          var b = store.get('bestRun', 0);
+          if (this.score() > b) { store.set('bestRun', this.score()); this.isNew = true; }
+        }
+      }
+    },
+    draw: function () {
+      var u = W / 14, gy = Math.round(H * 0.72);
+      col(WHITE);
+      R(0, gy, W, 2);
+      for (var i = 0; i < 6; i++) {
+        var sx = (((i * 3.7 - this.dist) % 16) + 16) % 16 * u - u;
+        R(sx, gy + 6 + (i % 3) * 5, 2, 2);
+      }
+      for (var j = 0; j < this.obs.length; j++) {
+        var o = this.obs[j];
+        R(o.x * u, gy - (o.alt + o.h) * u, o.w * u, o.h * u);
+      }
+      if (!(this.dead && Math.floor(this.deadT * 10) % 2 && this.deadT < 0.45))
+        R(2.5 * u, gy - (this.y + 1) * u, u, u);
+      T(this.score(), W / 2, H * 0.07, P());
+      if (this.t < 2 && !this.dead) { col(GREY); T('TOCA', W / 2, H * 0.86, 2); }
+      if (this.dead && this.deadT > 0.45) drawOver(this.score(), store.get('bestRun', 0), this.isNew);
+    }
+  };
+
+  // =====================================================
+  // MINA: funciona sola. El cuadrado excava y suma bloques, tambien con la pagina cerrada.
+  // =====================================================
+  var COLS = 7, GEM_AVG = 1 + 9 / 23;
+  function isGem(k) {
+    var h = k | 0;
+    h = Math.imul(h ^ (h >>> 15), 2246822519); h ^= h >>> 13;
+    h = Math.imul(h, 3266489917); h ^= h >>> 16;
+    return (h >>> 0) % 23 === 0;
+  }
+  function cellPos(k) {
+    var r = Math.floor(k / COLS), i = k % COLS;
+    return { r: r, c: (r % 2) ? COLS - 1 - i : i };
+  }
+  var mine = {
+    enter: function () { this.msg = ''; this.msgT = 0; this.saveT = 0; this.load(); },
+    load: function () {
+      var s = store.get('mine', null) || { b: 0, L: 0, q: 0, t: Date.now() };
+      this.b = s.b; this.L = s.L; this.q = s.q;
+      var el = Math.min(12 * 3600, Math.max(0, (Date.now() - s.t) / 1000));
+      if (el > 3) {
+        var g = this.rate() * GEM_AVG * el;
+        this.b += g; this.q += this.vs() * el;
+        if (g >= 1) { this.msg = '+' + fmt(g); this.msgT = 3; }
+      }
+      this.save();
+    },
+    save: function () { store.set('mine', { b: this.b, L: this.L, q: this.q, t: Date.now() }); },
+    rate: function () { return 1.2 * Math.pow(1.2, this.L); },
+    vs: function () { return Math.min(this.rate(), 9); },
+    cost: function () { return Math.floor(15 * Math.pow(1.45, this.L)); },
+    tap: function (x, y) {
+      if (y < H * 0.77) return;
+      if (x < W * 0.4) { this.save(); go(menu); return; }
+      if (this.b >= this.cost()) {
+        this.b -= this.cost(); this.L++;
+        this.msg = 'NIVEL ' + (this.L + 1); this.msgT = 1.2;
+        this.save();
+      }
+    },
+    update: function (dt) {
+      var per = this.rate() / this.vs();
+      var k0 = Math.floor(this.q);
+      this.q += this.vs() * dt;
+      var k1 = Math.floor(this.q);
+      for (var k = k0 + 1; k <= k1; k++) this.b += per * (isGem(k) ? 10 : 1);
+      this.msgT -= dt;
+      this.saveT += dt;
+      if (this.saveT > 5) { this.saveT = 0; this.save(); }
+    },
+    draw: function () {
+      var p = P();
+      var c = Math.floor(W * 0.88 / COLS), x0 = Math.round((W - c * COLS) / 2);
+      var gy0 = Math.round(H * 0.25), gy1 = Math.round(H * 0.76);
+      var k = Math.floor(this.q), f = this.q - k;
+      var a = cellPos(k), b = cellPos(k + 1);
+      var dx = a.c + (b.c - a.c) * f, dy = a.r + (b.r - a.r) * f;
+      var cam = dy - 1.2;
+
+      ctx.save();
+      ctx.beginPath(); ctx.rect(0, gy0, W, gy1 - gy0); ctx.clip();
+      col(WHITE);
+      var r0 = Math.max(0, Math.floor(cam)), rows = Math.ceil((gy1 - gy0) / c) + 1;
+      var sm = Math.max(2, Math.round(c * 0.36));
+      for (var r = r0; r <= r0 + rows; r++) {
+        var y = gy0 + (r - cam) * c;
+        for (var cc = 0; cc < COLS; cc++) {
+          var kk = r * COLS + ((r % 2) ? COLS - 1 - cc : cc);
+          if (kk <= k) continue;
+          var x = x0 + cc * c;
+          if (isGem(kk)) box(x + 3, y + 3, c - 6, c - 6, 2);
+          else R(x + (c - sm) / 2, y + (c - sm) / 2, sm, sm);
+        }
+      }
+      R(x0 + dx * c + 1, gy0 + (dy - cam) * c + 1, c - 2, c - 2);
+      ctx.restore();
+
+      // marcador
+      col(WHITE); T(fmt(this.b), W / 2, H * 0.05, p);
+      var er = this.rate() * GEM_AVG;
+      col(GREY); T('+' + (er < 100 ? er.toFixed(1) : fmt(er)) + '/S', W / 2, H * 0.05 + 5 * p + 4, 2);
+
+      if (this.msgT > 0) {
+        var mw = tw(this.msg, p) + 12;
+        col('#000'); R(W / 2 - mw / 2, H * 0.44, mw, 5 * p + 12);
+        col(WHITE); box(W / 2 - mw / 2, H * 0.44, mw, 5 * p + 12, 1);
+        T(this.msg, W / 2, H * 0.44 + 6, p);
+      }
+
+      // botones
+      var by = H * 0.79, bh = H * 0.15, m = W * 0.06;
+      col(GREY);
+      box(m, by, W * 0.3, bh, 1);
+      T('MENU', m + W * 0.15, by + bh / 2 - 5, 2);
+      var can = this.b >= this.cost();
+      var ux = m + W * 0.3 + 4, uw = W - m - ux;
+      col(can ? WHITE : GREY);
+      if (can) R(ux, by, uw, bh); else box(ux, by, uw, bh, 1);
+      col(can ? '#000' : GREY);
+      T('MEJORA', ux + uw / 2, by + bh / 2 - 12, 2);
+      T(fmt(this.cost()), ux + uw / 2, by + bh / 2 + 2, 2);
+    }
+  };
+
+  // ---------- Escenas y bucle ----------
+  var scene = menu;
+  function go(s) { scene = s; s.enter(); }
+
+  document.addEventListener('visibilitychange', function () {
+    if (scene !== mine) return;
+    if (document.hidden) mine.save(); else mine.load();
+  });
+  window.addEventListener('pagehide', function () { if (scene === mine) mine.save(); });
+
+  // ---------- Entrada ----------
+  function down(cx, cy) {
+    var r = cv.getBoundingClientRect();
+    scene.tap((cx - r.left) / r.width * W, (cy - r.top) / r.height * H);
+  }
+  var hasPE = !!window.PointerEvent;
+  if (hasPE) {
+    document.addEventListener('pointerdown', function (e) { e.preventDefault(); down(e.clientX, e.clientY); });
+  } else {
+    document.addEventListener('mousedown', function (e) { down(e.clientX, e.clientY); });
+  }
+  document.addEventListener('touchstart', function (e) {
+    if (!hasPE) { var t = e.changedTouches[0]; down(t.clientX, t.clientY); }
+    e.preventDefault();
+  }, { passive: false });
+  document.addEventListener('gesturestart', function (e) { e.preventDefault(); });
+  document.addEventListener('contextmenu', function (e) { e.preventDefault(); });
+
+  // teclado, para probar en el ordenador
+  document.addEventListener('keydown', function (e) {
+    if (e.repeat) return;
+    if (e.key === 'Escape') { if (scene === mine) mine.save(); go(menu); return; }
+    var k = e.key;
+    if (scene === stairs && k.indexOf('Arrow') === 0) {
+      stairs.move(k === 'ArrowLeft' || k === 'ArrowDown' ? -1 : 1, 0);
+    } else if (scene === tala && !tala.dead && (k === 'ArrowLeft' || k === 'ArrowRight' || k === ' ')) {
+      tala.setSide(k === ' ' ? -tala.side : k === 'ArrowLeft' ? -1 : 1);
+    } else if (e.key === ' ' || e.key === 'ArrowUp' || e.key === 'Enter') {
+      if (scene !== menu) scene.tap(W / 2, H / 2);
+    } else if (scene === menu && e.key >= '1' && e.key <= '4') {
+      go([stairs, tala, run, mine][+e.key - 1]);
+    }
+  });
+
+  var last = 0;
+  function frame(t) {
+    var dt = Math.min(0.1,Math.max(0, (t - last) / 1000 || 0));
+    last = t;
+    scene.update(dt);
+    ctx.setTransform(S, 0, 0, S, 0, 0);
+    ctx.fillStyle = '#000'; ctx.fillRect(0, 0, W, H);
+    ctx.fillStyle = WHITE;
+    scene.draw();
+    requestAnimationFrame(frame);
+  }
+  requestAnimationFrame(frame);
+
+  // para pruebas
+  window.__mj = { go: go, menu: menu, stairs: stairs, tala: tala, run: run, mine: mine, scene: function () { return scene; } };
+})();
+</script>
+</body>
+</html>
